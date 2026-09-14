@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="shark" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8588eb"/>
+      <stop offset="1" stop-color="#777bdd"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#shark)" d="M2.5 16.3 C6.2 14.5 8.8 14.2 10.8 11.1 C14.8 5.7 21.2 2.1 26.3 2.8 C24.3 5 24.6 8.1 24.4 10.8 C24.1 13 21 14 19.6 16.4 C17.8 19 17.8 22.5 19.5 24 C20.8 25.2 22.1 25 22.8 23.8 L23.5 21.1 C25 22.4 24 25.1 26.1 26 L29.3 27.2 C26.1 28.4 24 26.9 22.1 27.7 C18.2 28.5 15.6 27 12.4 26.1 L10 26.1 L7 30 C7 26.8 7.6 23.2 6.9 20.5 C6.6 18.8 3.8 18.7 2.5 17.6 Z"/>
+</svg>

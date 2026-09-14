@@ -25,10 +25,10 @@ cat > "$DESKTOP_DST" <<EOF
 Categories=Game;Utility;
 Comment[pt_BR]=Gerenciador de trainers .exe em prefixes Wine/Proton
 Comment=Gerenciador de trainers .exe em prefixes Wine/Proton
-Exec=python3 '$SCRIPT_DIR/trainer_manager.py'
+Exec=python3 "$SCRIPT_DIR/trainer_manager.py"
 GenericName[pt_BR]=
 GenericName=
-Icon=applications-games
+Icon=$SCRIPT_DIR/images/action-shark.svg
 MimeType=
 Name[pt_BR]=Action Shark
 Name=Action Shark
