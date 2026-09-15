@@ -226,6 +226,15 @@ def is_wemod_downloaded() -> bool:
     return app_dir is not None and os.path.isfile(os.path.join(app_dir, 'WeMod.exe'))
 
 
+def clear_cache() -> None:
+    """Remove os binarios baixados do WeMod, preservando o login compartilhado."""
+    if os.path.isdir(WEMOD_BIN_DIR):
+        shutil.rmtree(WEMOD_BIN_DIR)
+        _log(f'Cache do WeMod removido: {WEMOD_BIN_DIR}')
+    else:
+        _log('Cache do WeMod nao existe')
+
+
 def _get_latest_wemod_version() -> Optional[str]:
     """Consulta a API de releases do WeMod para pegar a versao estavel mais recente."""
     try:
@@ -878,6 +887,10 @@ def sync_wemod_login(wineprefix: str):
     WeModExternal = os.path.join(
         wineprefix, f'drive_c/users/{win_user}/AppData/Roaming/WeMod'
     )
+    # A instalacao por merge ignora a arvore de users do prefixo fonte. Em um
+    # prefixo que nunca iniciou o WeMod, AppData/Roaming pode ainda nao
+    # existir; os.symlink() falha com ENOENT se o diretorio pai nao existir.
+    os.makedirs(os.path.dirname(WeModExternal), exist_ok=True)
     os.makedirs(WEMOD_LOGIN_DIR, exist_ok=True)
 
     central_has = len(os.listdir(WEMOD_LOGIN_DIR)) > 0

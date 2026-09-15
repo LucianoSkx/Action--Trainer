@@ -409,7 +409,7 @@ class FilterChipBar(QWidget):
             ("STEAM", "Steam"),
             ("LUTRIS", "Lutris"),
             ("BOTTLES", "Bottles"),
-            ("ACTIVE", "Active]"),
+            ("ACTIVE", "Active"),
         ]
 
         for code, label in chips:
@@ -554,14 +554,25 @@ class GameBannerWidget(QWidget):
 class WeModDialog(QDialog):
     """Dedicated modern modal dialog for managing WeMod in a Wine prefix."""
 
+    # Workers must communicate with Qt widgets through queued signals. Direct
+    # widget access from Python threads is undefined and can crash the app.
+    log_message = pyqtSignal(str)
+    progress_changed = pyqtSignal(str, int)
+    operation_finished = pyqtSignal()
+
     def __init__(self, prefix: str, game_name: str, parent=None):
         super().__init__(parent)
         self.prefix = prefix
         self.game_name = game_name
+        self._operation_running = False
 
         self.setWindowTitle(f"WeMod Manager — {game_name}")
         self.setMinimumSize(680, 520)
         self.setStyleSheet(styles.GLOBAL_STYLESHEET)
+
+        self.log_message.connect(self.log)
+        self.progress_changed.connect(self._update_progress)
+        self.operation_finished.connect(self._finish_operation)
 
         self._init_ui()
         self._refresh_status()
@@ -638,15 +649,52 @@ class WeModDialog(QDialog):
 
         close_row = QHBoxLayout()
         close_row.addStretch()
-        close_btn = QPushButton("Fechar")
-        close_btn.clicked.connect(self.accept)
-        close_row.addWidget(close_btn)
+        self.close_btn = QPushButton("Fechar")
+        self.close_btn.clicked.connect(self.accept)
+        close_row.addWidget(self.close_btn)
         layout.addLayout(close_row)
 
     def log(self, msg: str):
         self.log_view.append(msg)
 
+    def _update_progress(self, stage: str, percent: int):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(percent)
+
+    def _set_operation_running(self, running: bool):
+        self._operation_running = running
+        for button in (
+            self.dl_btn,
+            self.clear_cache_btn,
+            self.install_btn,
+            self.start_btn,
+            self.stop_btn,
+            self.uninstall_btn,
+        ):
+            button.setEnabled(not running)
+        self.close_btn.setEnabled(not running)
+
+    def _start_operation(self):
+        if self._operation_running:
+            return False
+        self._set_operation_running(True)
+        return True
+
+    def _finish_operation(self):
+        self._set_operation_running(False)
+        self.progress_bar.setVisible(False)
+        self._refresh_status()
+
+    def closeEvent(self, event):
+        if self._operation_running:
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _refresh_status(self):
+        if self._operation_running:
+            return
+
         downloaded = wm.is_wemod_downloaded()
         has_cache = os.path.isdir(wm.WEMOD_BIN_DIR)
 
@@ -662,10 +710,11 @@ class WeModDialog(QDialog):
             self.uninstall_btn.setEnabled(False)
         else:
             s = wm.get_status(self.prefix)
-            self.install_btn.setEnabled(s != "Rodando")
-            self.start_btn.setEnabled(s == "Instalado")
+            self.install_btn.setEnabled(downloaded and s != "Rodando")
+            self.start_btn.setEnabled(downloaded and s == "Instalado")
             self.stop_btn.setEnabled(s == "Rodando")
             self.uninstall_btn.setEnabled(s in ("Instalado", "Rodando"))
+            self.clear_cache_btn.setEnabled(has_cache and s != "Rodando")
 
             if s == "Rodando":
                 st = "▶ Rodando no Prefixo"
@@ -681,32 +730,49 @@ class WeModDialog(QDialog):
         self.status_lbl.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {color};")
 
     def _download_wemod(self):
-        self.dl_btn.setEnabled(False)
+        if not self._start_operation():
+            return
         self.log("Baixando WeMod.exe mais recente...")
 
         def fetch():
             try:
                 wm.download_wemod()
-                self.log("✓ WeMod.exe baixado com sucesso.")
+                self.log_message.emit("✓ WeMod.exe baixado com sucesso.")
             except Exception as e:
-                self.log(f"✗ Erro ao baixar WeMod: {e}")
+                self.log_message.emit(f"✗ Erro ao baixar WeMod: {e}")
             finally:
-                QTimer.singleShot(0, self._refresh_status)
+                self.operation_finished.emit()
 
         threading.Thread(target=fetch, daemon=True).start()
 
     def _clear_cache(self):
-        try:
-            wm.clear_cache()
-            self.log("✓ Cache do WeMod limpo com sucesso.")
-        except Exception as e:
-            self.log(f"✗ Erro ao limpar cache: {e}")
-        self._refresh_status()
+        ans = QMessageBox.question(
+            self,
+            "Limpar Cache",
+            "Isso removerá os binários baixados do WeMod e exigirá um novo download.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes or not self._start_operation():
+            return
+
+        self.log("Limpando cache do WeMod...")
+
+        def task():
+            try:
+                wm.clear_cache()
+                self.log_message.emit("✓ Cache do WeMod limpo com sucesso.")
+            except Exception as e:
+                self.log_message.emit(f"✗ Erro ao limpar cache: {e}")
+            finally:
+                self.operation_finished.emit()
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _install_built(self):
         if not self.prefix:
             return
-        self.install_btn.setEnabled(False)
+        if not self._start_operation():
+            return
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.log(f"Iniciando instalação de prefixo pré-configurado em {self.prefix}...")
@@ -715,43 +781,60 @@ class WeModDialog(QDialog):
             try:
                 ok = wm.install_built_prefix(
                     self.prefix,
-                    log_callback=lambda m: self.log(m),
-                    progress_callback=lambda s, p: self.progress_bar.setValue(p),
+                    log_callback=lambda m: self.log_message.emit(m),
+                    progress_callback=lambda s, p: self.progress_changed.emit(s, p),
                 )
                 if ok:
-                    self.log("Configurando symlinks do WeMod...")
+                    self.log_message.emit("Configurando symlinks do WeMod...")
                     wm.install_wemod_prefix(
                         self.prefix,
-                        log_callback=lambda m: self.log(m),
+                        log_callback=lambda m: self.log_message.emit(m),
+                        progress_callback=lambda s, p: self.progress_changed.emit(s, p),
                     )
-                    self.log("✓ WeMod instalado com sucesso no prefixo!")
+                    self.log_message.emit("✓ WeMod instalado com sucesso no prefixo!")
                 else:
-                    self.log("✗ Falha na instalação do prefixo pré-configurado.")
+                    self.log_message.emit("✗ Falha na instalação do prefixo pré-configurado.")
             except Exception as e:
-                self.log(f"✗ Erro inesperado: {e}")
+                self.log_message.emit(f"✗ Erro inesperado: {e}")
             finally:
-                QTimer.singleShot(0, self._refresh_status)
-                QTimer.singleShot(0, lambda: self.progress_bar.setVisible(False))
+                self.operation_finished.emit()
 
         threading.Thread(target=task, daemon=True).start()
 
     def _start_wemod(self):
-        try:
-            self.log("Iniciando WeMod...")
-            wm.launch_wemod(self.prefix)
-            self.log("✓ WeMod iniciado.")
-        except Exception as e:
-            self.log(f"✗ Erro ao iniciar WeMod: {e}")
-        self._refresh_status()
+        if not self._start_operation():
+            return
+        self.log("Iniciando WeMod...")
+
+        def task():
+            try:
+                pid = wm.launch_wemod(self.prefix)
+                if pid:
+                    self.log_message.emit(f"✓ WeMod iniciado (PID {pid}).")
+                else:
+                    self.log_message.emit("✗ WeMod não iniciou; consulte o log do WeMod.")
+            except Exception as e:
+                self.log_message.emit(f"✗ Erro ao iniciar WeMod: {e}")
+            finally:
+                self.operation_finished.emit()
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _stop_wemod(self):
-        try:
-            self.log("Parando WeMod...")
-            wm.stop_wemod(self.prefix)
-            self.log("✓ WeMod finalizado.")
-        except Exception as e:
-            self.log(f"✗ Erro ao parar WeMod: {e}")
-        self._refresh_status()
+        if not self._start_operation():
+            return
+        self.log("Parando WeMod...")
+
+        def task():
+            try:
+                wm.stop_wemod(self.prefix)
+                self.log_message.emit("✓ WeMod finalizado.")
+            except Exception as e:
+                self.log_message.emit(f"✗ Erro ao parar WeMod: {e}")
+            finally:
+                self.operation_finished.emit()
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _uninstall_wemod(self):
         ans = QMessageBox.question(
@@ -761,12 +844,20 @@ class WeModDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if ans == QMessageBox.StandardButton.Yes:
-            try:
-                wm.uninstall_wemod_prefix(self.prefix, log_callback=lambda m: self.log(m))
-                self.log("✓ WeMod desinstalado.")
-            except Exception as e:
-                self.log(f"✗ Erro na desinstalação: {e}")
-            self._refresh_status()
+            if not self._start_operation():
+                return
+            self.log("Desinstalando WeMod...")
+
+            def task():
+                try:
+                    wm.remove_wemod_prefix(self.prefix)
+                    self.log_message.emit("✓ WeMod desinstalado.")
+                except Exception as e:
+                    self.log_message.emit(f"✗ Erro na desinstalação: {e}")
+                finally:
+                    self.operation_finished.emit()
+
+            threading.Thread(target=task, daemon=True).start()
 
 
 # ── Settings Dialog ───────────────────────────────────────────────────

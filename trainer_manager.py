@@ -674,8 +674,10 @@ def run_exe_in_prefix(wine_bin, exe_path, wineprefix, pin=None, extra_env=None):
     if extra_env:
         env.update(extra_env)
 
-    if 'proton' in wine_bin.lower():
-        _setup_proton_env_for_exe(env, wine_bin)
+    # The runner may be a custom Proton build whose path does not contain the
+    # word "proton". The helper is harmless for system Wine and correctly
+    # detects whether the expected lib/lib64 layout exists.
+    _setup_proton_env_for_exe(env, wine_bin)
 
     subprocess.Popen(
         [wine_bin, exe_path],
@@ -1106,23 +1108,9 @@ class ProtonRunner(QWidget):
         self._show_toast("✓ Lista atualizada.")
 
     def _auto_refresh(self):
-        running_entries = get_running_wine_entries()
-        running_prefixes = {p['wineprefix'] for p in running_entries if p.get('wineprefix')}
-        running_pids = {p['pid'] for p in running_entries if p.get('pid')}
-
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            d = item.data(0, Qt.ItemDataRole.UserRole)
-            if not d:
-                continue
-            pfx = d.get('wineprefix', '')
-            pid = d.get('pid')
-            is_running = (pid in running_pids) or (bool(pfx) and pfx in running_prefixes)
-            new_status = "Active" if is_running else "Idle"
-            if item.text(3) != new_status:
-                item.setText(3, new_status)
-
-        self._apply_filters()
+        # Rebuild the model so processes started or stopped after launch are
+        # actually added/removed from the table.
+        self._load_tree()
 
     def _load_tree(self):
         sel_data = self._selected_data()
@@ -1354,7 +1342,9 @@ class ProtonRunner(QWidget):
         pfx = data.get('wineprefix', '')
         if not pfx:
             return
-        has_pid = bool(data.get('pid'))
+        has_pid = bool(data.get('pid')) or any(
+            p.get('wineprefix') == pfx for p in get_running_wine_entries()
+        )
 
         menu = QMenu(self)
         act_copy = menu.addAction('Copiar WINEPREFIX')
@@ -1395,7 +1385,7 @@ class ProtonRunner(QWidget):
 
     # ── Prefix Management & Backups ──────────────────────────────────
 
-    def _kill_prefix_processes(self, wineprefix):
+    def _kill_prefix_processes(self, wineprefix, notify=True):
         wineprefix_bytes = f'WINEPREFIX={wineprefix}\0'.encode('utf-8')
         killed = []
         for entry in os.listdir('/proc'):
@@ -1404,15 +1394,20 @@ class ProtonRunner(QWidget):
             env_raw = _read_file_safe(f'/proc/{entry}/environ', 'rb')
             if not env_raw or wineprefix_bytes not in env_raw:
                 continue
+            comm = _read_file_safe(f'/proc/{entry}/comm').strip().lower()
+            if 'wineserver' in comm:
+                continue
             try:
                 os.kill(int(entry), 9)
                 killed.append(int(entry))
             except (OSError, PermissionError):
                 pass
-        if killed:
-            self._show_toast(f"✓ {len(killed)} processo(s) finalizado(s) no prefixo")
-        else:
-            self._show_toast("Nenhum processo rodando neste prefixo")
+        if notify:
+            if killed:
+                self._show_toast(f"✓ {len(killed)} processo(s) finalizado(s) no prefixo")
+            else:
+                self._show_toast("Nenhum processo rodando neste prefixo")
+        return len(killed)
 
     def _add_custom_prefix(self):
         name, ok = QInputDialog.getText(
@@ -1700,7 +1695,10 @@ class ProtonRunner(QWidget):
 
         def task():
             try:
-                self._kill_prefix_processes(pfx)
+                killed = self._kill_prefix_processes(pfx, notify=False)
+                if killed:
+                    self._built_msg_queue.append(
+                        f'{killed} processo(s) finalizado(s) antes da restauração')
                 self._built_msg_queue.append(f'Restaurando backup: {selected}')
                 self._built_progress_queue.append(('Removendo prefixo atual...', 10))
                 if os.path.isdir(pfx):
