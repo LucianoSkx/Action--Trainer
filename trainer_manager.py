@@ -115,13 +115,25 @@ def _steam_libraries():
     if raw:
         for m in re.finditer(r'"path"\s+"([^"]+)"', raw):
             p = m.group(1)
-            if p and os.path.isdir(p):
+            if p and os.path.isdir(p) and p not in libs:
                 libs.append(p)
     return libs
 
 
 def _find_steam_prefix(appid):
-    for lib in _steam_libraries():
+    libraries = _steam_libraries()
+    manifest_name = f'appmanifest_{appid}.acf'
+    # Quando o mesmo AppID possui mais de um compatdata (por exemplo, um
+    # prefixo auxiliar no Steam principal e o jogo numa biblioteca
+    # secundária), o manifesto identifica a biblioteca correta.
+    manifest_libraries = [
+        lib for lib in libraries
+        if os.path.isfile(os.path.join(lib, 'steamapps', manifest_name))
+    ]
+    ordered = manifest_libraries + [
+        lib for lib in libraries if lib not in manifest_libraries
+    ]
+    for lib in ordered:
         pfx = os.path.join(lib, 'steamapps', 'compatdata', str(appid), 'pfx')
         if os.path.isdir(pfx):
             return pfx

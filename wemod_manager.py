@@ -924,6 +924,108 @@ def sync_wemod_login(wineprefix: str):
         os.symlink(WEMOD_LOGIN_DIR, WeModExternal)
 
 
+def _get_steam_library_roots() -> list[str]:
+    """Retorna a raiz Steam e todas as bibliotecas configuradas no Linux."""
+    candidates = [
+        os.environ.get('STEAM_COMPAT_CLIENT_INSTALL_PATH', ''),
+        os.path.expanduser('~/.local/share/Steam'),
+        os.path.expanduser('~/.steam/steam'),
+        os.path.expanduser('~/.steam/root'),
+    ]
+    roots = []
+    seen = set()
+
+    def add(path: str):
+        path = os.path.realpath(os.path.expanduser(path))
+        if (path and os.path.isdir(os.path.join(path, 'steamapps'))
+                and path not in seen):
+            seen.add(path)
+            roots.append(path)
+
+    for candidate in candidates:
+        if candidate:
+            add(candidate)
+
+    # libraryfolders.vdf lista as bibliotecas secundarias. A busca fica
+    # limitada a caminhos existentes para não expor entradas obsoletas.
+    for root in list(roots):
+        vdf = os.path.join(root, 'steamapps', 'libraryfolders.vdf')
+        try:
+            raw = Path(vdf).read_text(errors='replace')
+        except OSError:
+            continue
+        for match in re.finditer(r'"path"\s+"([^"]+)"', raw):
+            add(match.group(1).replace('\\\\', '\\'))
+
+    return roots
+
+
+def _setup_steam_library_bridge(wineprefix: str, wine_bin: str) -> list[str]:
+    """Expõe bibliotecas Linux ao detector Steam do WeMod dentro do Wine.
+
+    O detector do WeMod usa a instalação Steam registrada no Windows e
+    resolve cada biblioteca a partir de ``libraryfolders.vdf``. Um prefixo
+    Proton normalmente só possui o registro criado pelo jogo, sem uma
+    instalação Windows do Steam. A ponte mantém os dados reais da Steam no
+    Linux e cria um VDF com caminhos Z: legíveis pelo Electron/Node do Wine.
+    """
+    libraries = _get_steam_library_roots()
+    if not libraries:
+        _log('Steam nao encontrada: ponte de bibliotecas nao criada')
+        return []
+
+    bridge = os.path.join(wineprefix, 'drive_c', 'TrainerManagerSteam')
+    steamapps = os.path.join(bridge, 'steamapps')
+    os.makedirs(steamapps, exist_ok=True)
+
+    # O parser VDF do WeMod espera barras invertidas escapadas no arquivo,
+    # enquanto o caminho retornado pelo _winpath usa uma barra simples.
+    vdf_lines = ['"libraryfolders"', '{']
+    for index, library in enumerate(libraries, start=1):
+        windows_path = _winpath(library).replace('\\', '\\\\')
+        vdf_lines.extend([
+            f'\t"{index}"',
+            '\t{',
+            f'\t\t"path"\t"{windows_path}"',
+            '\t}',
+        ])
+    vdf_lines.append('}')
+    Path(os.path.join(steamapps, 'libraryfolders.vdf')).write_text(
+        '\n'.join(vdf_lines) + '\n'
+    )
+
+    # appinfo e os manifests continuam sendo lidos dos diretórios reais,
+    # através dos caminhos Z: gerados acima. O appcache é opcional, mas
+    # melhora ícones e configurações de inicialização no WeMod.
+    appcache_source = os.path.join(libraries[0], 'appcache')
+    appcache_target = os.path.join(bridge, 'appcache')
+    if os.path.isdir(appcache_source) and not os.path.lexists(appcache_target):
+        try:
+            os.symlink(appcache_source, appcache_target, target_is_directory=True)
+        except OSError as exc:
+            _log(f'Nao foi possivel ligar o appcache Steam: {exc}')
+
+    # O detector consulta especificamente InstallPath na visão 32-bit do
+    # registro. Escrevemos ambas as visões para funcionar com prefixos que
+    # foram criados por Proton/Wine em arquiteturas diferentes.
+    registry_path = r'C:\TrainerManagerSteam'
+    for key in (
+        r'HKLM\Software\Valve\Steam',
+        r'HKLM\Software\Wow6432Node\Valve\Steam',
+    ):
+        result = _run_wine(wine_bin, wineprefix, [
+            'reg', 'add', key, '/v', 'InstallPath',
+            '/t', 'REG_SZ', '/d', registry_path, '/f',
+        ])
+        if result.returncode != 0:
+            _log(f'Falha ao registrar Steam em {key}: '
+                 f'{result.stderr.strip()[-300:]}')
+
+    _log('Ponte Steam criada em C:\\TrainerManagerSteam: '
+         + ', '.join(libraries))
+    return libraries
+
+
 # ── launch / stop ────────────────────────────────────────────────────
 
 def _get_proton_binary(wineprefix: str) -> Optional[str]:
@@ -1117,6 +1219,11 @@ def launch_wemod(wineprefix: str) -> Optional[int]:
     wine_bin = _get_wine_binary(wineprefix)
     _setup_proton_env(env, wine_bin)
     env['PATH'] = os.path.dirname(wine_bin) + ':' + env.get('PATH', '')
+    steam_libraries = _setup_steam_library_bridge(wineprefix, wine_bin)
+    if steam_libraries:
+        env['STEAM_COMPAT_CLIENT_INSTALL_PATH'] = steam_libraries[0]
+        env['STEAM_COMPAT_LIBRARY_PATHS'] = ':'.join(steam_libraries)
+        env['STEAM_COMPAT_DATA_PATH'] = os.path.dirname(wineprefix)
     cmd = [wine_bin, wemod_exe] + flags
     launch_desc = f'wine direto ({os.path.basename(wine_bin)})'
 
