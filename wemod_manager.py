@@ -1089,13 +1089,19 @@ def launch_wemod(wineprefix: str) -> Optional[int]:
         _log(f'WeMod.exe nao encontrado em {wemod_exe}')
         return None
 
+    # O fluxo de login abre uma webview Chromium. No Proton/Wine deste
+    # prefixo, forcar a GPU no processo principal e bloquear o rasterizador
+    # por software faz o Electron encerrar com falha nativa ao criar GLES ou
+    # WebGPU. Deixe o Chromium usar o fallback por software e desative apenas
+    # os caminhos acelerados que causam o crash.
     flags = [
         '--disable-gpu',
-        '--no-sandbox',
-        '--in-process-gpu',
         '--disable-gpu-compositing',
+        '--disable-gpu-rasterization',
+        '--disable-features=Vulkan,WebGPU,CanvasOopRasterization,Accelerated2dCanvas,UseSkiaRenderer',
         '--use-gl=swiftshader',
-        '--disable-software-rasterizer',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
         '--no-zygote',
         '--disable-breakpad',
     ]
